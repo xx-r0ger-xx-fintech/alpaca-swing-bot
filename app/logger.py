@@ -8,8 +8,9 @@ import pytz
 
 ET = pytz.timezone("America/New_York")
 
-# In-memory buffer for today's log content (used for GitHub push at end of scan)
+# In-memory buffer for today's log content (used for GitHub push and Discord at end of scan)
 _log_buffer: list[str] = []
+_discord_lines: list[str] = []
 
 
 def _now() -> str:
@@ -47,6 +48,45 @@ def _write_obsidian(line: str):
 
     with open(note_path, "a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+def _send_discord(equity: float):
+    """Post daily scan summary to Discord via webhook."""
+    webhook_url = os.getenv("DISCORD_WEBHOOK_URL", "")
+    if not webhook_url or not _discord_lines:
+        return
+
+    log_url = f"https://github.com/xx-r0ger-xx/alpaca-swing-bot/tree/main/storage/logs"
+
+    body = {
+        "embeds": [
+            {
+                "title": f"Alpaca Swing Bot — {_today()}",
+                "color": 3066993,  # green
+                "fields": [
+                    {
+                        "name": f"Account Equity: ${equity:.2f}",
+                        "value": "\n".join(_discord_lines) or "No activity.",
+                    }
+                ],
+                "footer": {
+                    "text": f"Full log: {log_url}"
+                },
+            }
+        ]
+    }
+
+    try:
+        req = urllib.request.Request(
+            webhook_url,
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req):
+            log("Discord notification sent")
+    except urllib.error.HTTPError as e:
+        log(f"Discord notify failed: {e.read().decode()}")
 
 
 def _push_to_github():
@@ -103,7 +143,13 @@ def _push_to_github():
 
 # ── Public logging helpers ─────────────────────────────────────────────────────
 
+_current_equity: float = 0.0
+
+
 def log_scan_start(equity: float, trade_size: float, open_positions: int):
+    global _current_equity
+    _current_equity = equity
+
     msg = (
         f"Scan started | "
         f"Equity: ${equity:.2f} | "
@@ -122,6 +168,7 @@ def log_decision(symbol: str, signal, reason: str, price: float):
     log(msg)
     _write_obsidian(f"- {msg}")
     _buffer(f"- {msg}")
+    _discord_lines.append(msg)
 
 
 def log_order(symbol: str, action: str, price: float, qty: float, tp: float, sl: float):
@@ -133,6 +180,7 @@ def log_order(symbol: str, action: str, price: float, qty: float, tp: float, sl:
     log(msg)
     _write_obsidian(f"  - **{msg}**")
     _buffer(f"  - **{msg}**")
+    _discord_lines.append(f"  -> {msg}")
 
 
 def log_skipped(symbol: str, reason: str):
@@ -153,4 +201,6 @@ def log_scan_end():
     _write_obsidian("\n---\n")
     _buffer("\n---\n")
     _push_to_github()
+    _send_discord(_current_equity)
     _log_buffer.clear()
+    _discord_lines.clear()
