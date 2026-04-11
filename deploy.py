@@ -2,17 +2,18 @@
 deploy.py — Alpaca Swing Bot DigitalOcean deployment script
 
 Usage:
-    DO_TOKEN=xxx ALPACA_API_KEY=xxx ALPACA_API_SECRET=xxx python deploy.py
+    python deploy.py
 
-Required env vars:
-    DO_TOKEN          — DigitalOcean API token (Read + Write)
-    ALPACA_API_KEY    — Your Alpaca live trading API key
-    ALPACA_API_SECRET — Your Alpaca live trading API secret
+Credentials are loaded from a local .env file (never committed to git).
+See .env.example for required variables.
 """
 
 import os
 import sys
 import time
+
+from dotenv import load_dotenv
+load_dotenv()
 import json
 import urllib.request
 import urllib.error
@@ -45,6 +46,13 @@ def get_alpaca_keys() -> tuple:
     return key, secret
 
 
+def get_optional_envs() -> dict:
+    return {
+        "GITHUB_TOKEN":        os.getenv("GITHUB_TOKEN", ""),
+        "DISCORD_WEBHOOK_URL": os.getenv("DISCORD_WEBHOOK_URL", ""),
+    }
+
+
 def api_request(method: str, path: str, token: str, body: dict = None) -> dict:
     url  = f"{DO_API}{path}"
     data = json.dumps(body).encode() if body else None
@@ -74,7 +82,16 @@ def log(msg: str):
 
 # ── App spec ───────────────────────────────────────────────────────────────────
 
-def build_app_spec(alpaca_key: str, alpaca_secret: str) -> dict:
+def build_app_spec(alpaca_key: str, alpaca_secret: str, extras: dict) -> dict:
+    envs = [
+        {"key": "ALPACA_API_KEY",    "value": alpaca_key,    "type": "SECRET", "scope": "RUN_TIME"},
+        {"key": "ALPACA_API_SECRET", "value": alpaca_secret, "type": "SECRET", "scope": "RUN_TIME"},
+    ]
+
+    for key, value in extras.items():
+        if value:
+            envs.append({"key": key, "value": value, "type": "SECRET", "scope": "RUN_TIME"})
+
     return {
         "name":   APP_NAME,
         "region": REGION,
@@ -83,24 +100,11 @@ def build_app_spec(alpaca_key: str, alpaca_secret: str) -> dict:
                 "name":        "worker",
                 "run_command": RUN_COMMAND,
                 "github": {
-                    "repo":            GITHUB_REPO,
-                    "branch":          BRANCH,
-                    "deploy_on_push":  True,
+                    "repo":           GITHUB_REPO,
+                    "branch":         BRANCH,
+                    "deploy_on_push": True,
                 },
-                "envs": [
-                    {
-                        "key":   "ALPACA_API_KEY",
-                        "value": alpaca_key,
-                        "type":  "SECRET",
-                        "scope": "RUN_TIME",
-                    },
-                    {
-                        "key":   "ALPACA_API_SECRET",
-                        "value": alpaca_secret,
-                        "type":  "SECRET",
-                        "scope": "RUN_TIME",
-                    },
-                ],
+                "envs": envs,
             }
         ],
     }
@@ -166,7 +170,8 @@ def main():
 
     token          = get_token()
     alpaca_key, alpaca_secret = get_alpaca_keys()
-    spec           = build_app_spec(alpaca_key, alpaca_secret)
+    extras         = get_optional_envs()
+    spec           = build_app_spec(alpaca_key, alpaca_secret, extras)
 
     # Check if app exists
     existing = find_existing_app(token)
@@ -193,12 +198,12 @@ def main():
 
     print()
     if final_phase == "ACTIVE":
-        print("✅ Deployment successful! Bot is live.")
+        print("SUCCESS: Deployment successful! Bot is live.")
         print()
         print(f"  Dashboard: https://cloud.digitalocean.com/apps/{app_id}")
         print(f"  Logs:      https://cloud.digitalocean.com/apps/{app_id}/runtime-logs")
     else:
-        print(f"❌ Deployment ended with phase: {final_phase}")
+        print(f"FAILED: Deployment ended with phase: {final_phase}")
         print(f"  Check logs: https://cloud.digitalocean.com/apps/{app_id}/runtime-logs")
         sys.exit(1)
 
