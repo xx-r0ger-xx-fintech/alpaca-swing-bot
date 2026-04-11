@@ -74,9 +74,14 @@ alpaca-swing-bot/
 
 ### Automated (recommended)
 
+1. Copy `.env.example` to `.env` and fill in your credentials
+2. Run:
+
 ```bash
-DO_TOKEN=xxx ALPACA_API_KEY=xxx ALPACA_API_SECRET=xxx python deploy.py
+python deploy.py
 ```
+
+The script creates the DO app, sets all secrets, and tails the deployment automatically.
 
 ### Manual (DigitalOcean App Platform)
 
