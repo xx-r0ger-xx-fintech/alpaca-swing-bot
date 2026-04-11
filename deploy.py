@@ -21,7 +21,7 @@ import urllib.error
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 APP_NAME    = "alpaca-swing-bot"
-GITHUB_REPO = "xx-r0ger-xx/alpaca-swing-bot"
+GITHUB_REPO = "xx-r0ger-xx-fintech/alpaca-swing-bot"
 BRANCH      = "main"
 RUN_COMMAND = "python -m app.main"
 REGION      = "nyc"
