@@ -184,7 +184,10 @@ def _send_discord():
         req = urllib.request.Request(
             webhook_url,
             data=json.dumps({"embeds": embeds}).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent":   "DiscordBot (https://github.com, 1.0)",
+            },
             method="POST",
         )
         with urllib.request.urlopen(req):
