@@ -45,10 +45,21 @@ Position sizing compounds automatically — as the account grows, trade size gro
 
 ## Logging
 
-After each scan:
+After every scan a Discord notification is always sent, regardless of whether trades were placed. It uses multiple color-coded embeds:
+
+| Embed | Color | Content |
+|---|---|---|
+| Account Snapshot | Blue | Equity, cash, trade size, open positions with unrealized P&L |
+| Buy Orders | Green | Any buy orders executed this scan |
+| Sell Orders | Red | Any sell orders executed this scan |
+| Signals Evaluated | Yellow | Every symbol that reached strategy evaluation with reason |
+| Pre-filter Skips | Purple | Symbols skipped before strategy (max positions, no cash, etc.) |
+| Scan Summary | Blue | Total counts + next scan time |
+
+Pre-filter and trade embeds are omitted when empty. The summary is always present.
+
 - **DigitalOcean logs** — full detail, real-time
 - **GitHub** — daily markdown summary committed to `storage/logs/YYYY-MM-DD.md`
-- **Discord** — morning ping with account equity and all decisions
 
 ---
 
@@ -64,6 +75,7 @@ alpaca-swing-bot/
 ├── storage/
 │   └── logs/          # Daily trade log markdown files
 ├── deploy.py          # Automated DigitalOcean deployment script
+├── test_notify.py     # Send a test Discord notification with mock data
 ├── Dockerfile
 └── requirements.txt
 ```
