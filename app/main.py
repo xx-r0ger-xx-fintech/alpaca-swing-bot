@@ -86,7 +86,7 @@ def run_scan(trading_client, data_client):
     open_positions = {p.symbol: p for p in trading_client.get_all_positions()}
     trade_size     = min(equity * config.TRADE_SIZE_PCT, config.MAX_TRADE_SIZE)
 
-    logger.log_scan_start(equity, trade_size, len(open_positions))
+    logger.log_scan_start(equity, cash, trade_size, open_positions, len(config.WATCHLIST))
 
     for symbol in config.WATCHLIST:
 

@@ -3,14 +3,31 @@ import json
 import base64
 import urllib.request
 import urllib.error
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 ET = pytz.timezone("America/New_York")
 
-# In-memory buffer for today's log content (used for GitHub push and Discord at end of scan)
-_log_buffer: list[str] = []
-_discord_lines: list[str] = []
+# ── Internal state ─────────────────────────────────────────────────────────────
+
+_log_buffer:    list[str] = []
+_buy_lines:     list[str] = []
+_sell_lines:    list[str] = []
+_signal_lines:  list[str] = []
+_skip_lines:    list[str] = []
+
+_current_equity:     float = 0.0
+_current_cash:       float = 0.0
+_current_trade_size: float = 0.0
+_open_positions:     list[dict] = []   # [{symbol, qty, entry, price, pl, plpc}]
+_watchlist_size:     int = 0
+
+# Discord embed colors
+_BLUE   = 3447003   # #3498DB
+_GREEN  = 3066993   # #2ECC71
+_RED    = 15158332  # #E74C3C
+_YELLOW = 15844367  # #F1C40F
+_PURPLE = 10181046  # #9B59B6
 
 
 def _now() -> str:
@@ -27,12 +44,10 @@ def log(msg: str):
 
 
 def _buffer(line: str):
-    """Append a line to the in-memory log buffer."""
     _log_buffer.append(line)
 
 
 def _write_obsidian(line: str):
-    """Append a line to today's trade note in the Obsidian vault (local only)."""
     vault_path = os.getenv("OBSIDIAN_VAULT_PATH", "")
     if not vault_path:
         return
@@ -50,36 +65,125 @@ def _write_obsidian(line: str):
         f.write(line + "\n")
 
 
-def _send_discord(equity: float):
-    """Post daily scan summary to Discord via webhook."""
+def _next_scan_str() -> str:
+    now  = datetime.now(ET)
+    next_day = now.date() + timedelta(days=1)
+    while next_day.weekday() >= 5:   # skip Saturday (5) and Sunday (6)
+        next_day += timedelta(days=1)
+    return f"{next_day.strftime('%A, %b')} {next_day.day} at 9:35 AM ET"
+
+
+def _send_discord():
     webhook_url = os.getenv("DISCORD_WEBHOOK_URL", "")
-    if not webhook_url or not _discord_lines:
+    if not webhook_url:
         return
 
-    log_url = f"https://github.com/xx-r0ger-xx-fintech/alpaca-swing-bot/tree/main/storage/logs"
+    log_url = "https://github.com/xx-r0ger-xx-fintech/alpaca-swing-bot/tree/main/storage/logs"
+    embeds  = []
 
-    body = {
-        "embeds": [
+    # ── Embed 1: Account Snapshot (blue) ──────────────────────────────────────
+    pos_lines = []
+    for p in _open_positions:
+        pl_sign = "+" if p["pl"] >= 0 else ""
+        pos_lines.append(
+            f"**{p['symbol']}** | Qty: {p['qty']} | "
+            f"Entry: ${p['entry']:.2f} | Price: ${p['price']:.2f} | "
+            f"P&L: {pl_sign}${p['pl']:.2f} ({pl_sign}{p['plpc']:.1f}%)"
+        )
+
+    max_pos = os.getenv("MAX_POSITIONS", "3")
+    embeds.append({
+        "title": f"Alpaca Swing Bot — {_today()}",
+        "color": _BLUE,
+        "fields": [
             {
-                "title": f"Alpaca Swing Bot — {_today()}",
-                "color": 3066993,  # green
-                "fields": [
-                    {
-                        "name": f"Account Equity: ${equity:.2f}",
-                        "value": "\n".join(_discord_lines) or "No activity.",
-                    }
-                ],
-                "footer": {
-                    "text": f"Full log: {log_url}"
-                },
-            }
-        ]
-    }
+                "name": "Portfolio",
+                "value": (
+                    f"Equity: **${_current_equity:,.2f}** | "
+                    f"Cash: **${_current_cash:,.2f}** | "
+                    f"Trade size: **${_current_trade_size:,.2f}**"
+                ),
+                "inline": False,
+            },
+            {
+                "name": f"Open Positions ({len(_open_positions)}/{max_pos})",
+                "value": "\n".join(pos_lines) if pos_lines else "No open positions",
+                "inline": False,
+            },
+        ],
+    })
+
+    # ── Embed 2a: Buy Orders (green) ──────────────────────────────────────────
+    if _buy_lines:
+        embeds.append({
+            "title": "Buy Orders",
+            "color": _GREEN,
+            "fields": [{
+                "name": f"{len(_buy_lines)} order(s) executed",
+                "value": "\n".join(_buy_lines),
+                "inline": False,
+            }],
+        })
+
+    # ── Embed 2b: Sell Orders (red) ───────────────────────────────────────────
+    if _sell_lines:
+        embeds.append({
+            "title": "Sell Orders",
+            "color": _RED,
+            "fields": [{
+                "name": f"{len(_sell_lines)} order(s) executed",
+                "value": "\n".join(_sell_lines),
+                "inline": False,
+            }],
+        })
+
+    # ── Embed 3: Signals Evaluated (yellow) ───────────────────────────────────
+    if _signal_lines:
+        embeds.append({
+            "title": "Signals Evaluated",
+            "color": _YELLOW,
+            "fields": [{
+                "name": f"{len(_signal_lines)} symbol(s) reached strategy",
+                "value": "\n".join(_signal_lines),
+                "inline": False,
+            }],
+        })
+
+    # ── Embed 4: Pre-filter Skips (purple) ────────────────────────────────────
+    if _skip_lines:
+        embeds.append({
+            "title": "Pre-filter Skips",
+            "color": _PURPLE,
+            "fields": [{
+                "name": f"{len(_skip_lines)} symbol(s) filtered before strategy",
+                "value": "\n".join(_skip_lines),
+                "inline": False,
+            }],
+        })
+
+    # ── Embed 5: Summary (blue) — always present ──────────────────────────────
+    trades_placed = len(_buy_lines) + len(_sell_lines)
+    summary_value = "\n".join([
+        f"Symbols scanned: **{_watchlist_size}**",
+        f"Trades placed: **{trades_placed}**",
+        f"Signals evaluated: **{len(_signal_lines)}**",
+        f"Pre-filtered: **{len(_skip_lines)}**",
+    ])
+
+    embeds.append({
+        "title": "Scan Summary",
+        "color": _BLUE,
+        "fields": [
+            {"name": "Results",    "value": summary_value,      "inline": False},
+            {"name": "Next Scan",  "value": _next_scan_str(),   "inline": False},
+        ],
+        "footer": {"text": f"Full log: {log_url}"},
+    })
 
     try:
         req = urllib.request.Request(
             webhook_url,
-            data=json.dumps(body).encode(),
+            data=json.dumps({"embeds": embeds}).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -90,11 +194,6 @@ def _send_discord(equity: float):
 
 
 def _push_to_github():
-    """
-    Commits today's log buffer to storage/logs/YYYY-MM-DD.md in the bot repo.
-    Requires GITHUB_TOKEN env var (classic token with repo scope).
-    Repo is hardcoded to xx-r0ger-xx/alpaca-swing-bot.
-    """
     token = os.getenv("GITHUB_TOKEN", "")
     if not token or not _log_buffer:
         return
@@ -112,19 +211,15 @@ def _push_to_github():
         "Accept":        "application/vnd.github+json",
     }
 
-    # Check if file already exists (need SHA to update)
     sha = None
     try:
         req = urllib.request.Request(api_url, headers=headers)
         with urllib.request.urlopen(req) as resp:
             sha = json.loads(resp.read()).get("sha")
     except urllib.error.HTTPError:
-        pass  # File doesn't exist yet — that's fine
+        pass
 
-    body = {
-        "message": f"Trade log {_today()}",
-        "content": encoded,
-    }
+    body = {"message": f"Trade log {_today()}", "content": encoded}
     if sha:
         body["sha"] = sha
 
@@ -143,18 +238,30 @@ def _push_to_github():
 
 # ── Public logging helpers ─────────────────────────────────────────────────────
 
-_current_equity: float = 0.0
+def log_scan_start(equity: float, cash: float, trade_size: float, positions: dict, watchlist_size: int):
+    global _current_equity, _current_cash, _current_trade_size, _open_positions, _watchlist_size
+    _current_equity     = equity
+    _current_cash       = cash
+    _current_trade_size = trade_size
+    _watchlist_size     = watchlist_size
 
-
-def log_scan_start(equity: float, trade_size: float, open_positions: int):
-    global _current_equity
-    _current_equity = equity
+    _open_positions = []
+    for symbol, p in positions.items():
+        _open_positions.append({
+            "symbol": symbol,
+            "qty":    float(p.qty),
+            "entry":  float(p.avg_entry_price),
+            "price":  float(p.current_price),
+            "pl":     float(p.unrealized_pl),
+            "plpc":   float(p.unrealized_plpc) * 100,  # decimal → percentage
+        })
 
     msg = (
         f"Scan started | "
         f"Equity: ${equity:.2f} | "
+        f"Cash: ${cash:.2f} | "
         f"Trade size: ${trade_size:.2f} | "
-        f"Open positions: {open_positions}/3"
+        f"Open positions: {len(positions)}/{os.getenv('MAX_POSITIONS', '3')}"
     )
     log(msg)
     _write_obsidian(f"\n## Scan — {_now()}\n**{msg}**\n")
@@ -168,7 +275,7 @@ def log_decision(symbol: str, signal, reason: str, price: float):
     log(msg)
     _write_obsidian(f"- {msg}")
     _buffer(f"- {msg}")
-    _discord_lines.append(msg)
+    _signal_lines.append(msg)
 
 
 def log_order(symbol: str, action: str, price: float, qty: float, tp: float, sl: float):
@@ -180,7 +287,10 @@ def log_order(symbol: str, action: str, price: float, qty: float, tp: float, sl:
     log(msg)
     _write_obsidian(f"  - **{msg}**")
     _buffer(f"  - **{msg}**")
-    _discord_lines.append(f"  -> {msg}")
+    if action == "BUY":
+        _buy_lines.append(msg)
+    else:
+        _sell_lines.append(msg)
 
 
 def log_skipped(symbol: str, reason: str):
@@ -188,6 +298,7 @@ def log_skipped(symbol: str, reason: str):
     log(msg)
     _write_obsidian(f"- {msg}")
     _buffer(f"- {msg}")
+    _skip_lines.append(msg)
 
 
 def log_error(msg: str):
@@ -201,6 +312,9 @@ def log_scan_end():
     _write_obsidian("\n---\n")
     _buffer("\n---\n")
     _push_to_github()
-    _send_discord(_current_equity)
+    _send_discord()
     _log_buffer.clear()
-    _discord_lines.clear()
+    _buy_lines.clear()
+    _sell_lines.clear()
+    _signal_lines.clear()
+    _skip_lines.clear()
