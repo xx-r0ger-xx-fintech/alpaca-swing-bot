@@ -22,8 +22,9 @@ RSI_PERIOD         = int(os.getenv("RSI_PERIOD",          "14"))
 RSI_BUY_THRESHOLD  = float(os.getenv("RSI_BUY_THRESHOLD", "55"))
 RSI_SELL_THRESHOLD = float(os.getenv("RSI_SELL_THRESHOLD","45"))
 
-# How many daily bars to fetch for indicator calculation
-BARS_TO_FETCH = int(os.getenv("BARS_TO_FETCH", "90"))
+# How many calendar days back to fetch for indicator calculation
+# 120 days ≈ 84 trading days — comfortable headroom above the default EMA_LONG of 50
+BARS_TO_FETCH = int(os.getenv("BARS_TO_FETCH", "120"))
 
 # Obsidian vault path — set locally to write daily trade notes directly to vault
 # Leave blank on DigitalOcean (DO logs are the source of truth there)

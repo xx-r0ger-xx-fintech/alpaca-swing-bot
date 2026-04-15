@@ -15,6 +15,7 @@ _buy_lines:     list[str] = []
 _sell_lines:    list[str] = []
 _signal_lines:  list[str] = []
 _skip_lines:    list[str] = []
+_error_lines:   list[str] = []
 
 _current_equity:     float = 0.0
 _current_cash:       float = 0.0
@@ -161,7 +162,19 @@ def _send_discord():
             }],
         })
 
-    # ── Embed 5: Summary (blue) — always present ──────────────────────────────
+    # ── Embed 5: Errors (red) — only if any ──────────────────────────────────
+    if _error_lines:
+        embeds.append({
+            "title": "Errors",
+            "color": _RED,
+            "fields": [{
+                "name": f"{len(_error_lines)} error(s) during scan",
+                "value": "\n".join(_error_lines),
+                "inline": False,
+            }],
+        })
+
+    # ── Embed 6: Summary (blue) — always present ──────────────────────────────
     trades_placed = len(_buy_lines) + len(_sell_lines)
     summary_value = "\n".join([
         f"Symbols scanned: **{_watchlist_size}**",
@@ -193,7 +206,9 @@ def _send_discord():
         with urllib.request.urlopen(req):
             log("Discord notification sent")
     except urllib.error.HTTPError as e:
-        log(f"Discord notify failed: {e.read().decode()}")
+        log(f"Discord notify failed (HTTP {e.code}): {e.read().decode()}")
+    except urllib.error.URLError as e:
+        log(f"Discord notify failed: {e.reason}")
 
 
 def _push_to_github():
@@ -219,7 +234,7 @@ def _push_to_github():
         req = urllib.request.Request(api_url, headers=headers)
         with urllib.request.urlopen(req) as resp:
             sha = json.loads(resp.read()).get("sha")
-    except urllib.error.HTTPError:
+    except (urllib.error.HTTPError, urllib.error.URLError):
         pass
 
     body = {"message": f"Trade log {_today()}", "content": encoded}
@@ -236,7 +251,9 @@ def _push_to_github():
         with urllib.request.urlopen(req):
             log(f"Trade log pushed to GitHub: storage/logs/{_today()}.md")
     except urllib.error.HTTPError as e:
-        log(f"GitHub push failed: {e.read().decode()}")
+        log(f"GitHub push failed (HTTP {e.code}): {e.read().decode()}")
+    except urllib.error.URLError as e:
+        log(f"GitHub push failed: {e.reason}")
 
 
 # ── Public logging helpers ─────────────────────────────────────────────────────
@@ -281,12 +298,15 @@ def log_decision(symbol: str, signal, reason: str, price: float):
     _signal_lines.append(msg)
 
 
-def log_order(symbol: str, action: str, price: float, qty: float, tp: float, sl: float):
-    msg = (
-        f"ORDER {action} {qty:.4f} {symbol} @ ${price:.2f} | "
-        f"TP: ${tp:.2f} (+{((tp/price)-1)*100:.1f}%) | "
-        f"SL: ${sl:.2f} (-{(1-(sl/price))*100:.1f}%)"
-    )
+def log_order(symbol: str, action: str, price: float, qty: float, tp: float = 0.0, sl: float = 0.0):
+    if action == "BUY":
+        msg = (
+            f"ORDER BUY {qty:.4f} {symbol} @ ${price:.2f} | "
+            f"TP: ${tp:.2f} (+{((tp/price)-1)*100:.1f}%) | "
+            f"SL: ${sl:.2f} (-{(1-(sl/price))*100:.1f}%)"
+        )
+    else:
+        msg = f"ORDER SELL {qty:.4f} {symbol} @ ${price:.2f}"
     log(msg)
     _write_obsidian(f"  - **{msg}**")
     _buffer(f"  - **{msg}**")
@@ -308,16 +328,20 @@ def log_error(msg: str):
     log(f"ERROR: {msg}")
     _write_obsidian(f"- ERROR: {msg}")
     _buffer(f"- ERROR: {msg}")
+    _error_lines.append(msg)
 
 
 def log_scan_end():
     log("=== Scan complete ===")
     _write_obsidian("\n---\n")
     _buffer("\n---\n")
-    _push_to_github()
-    _send_discord()
-    _log_buffer.clear()
-    _buy_lines.clear()
-    _sell_lines.clear()
-    _signal_lines.clear()
-    _skip_lines.clear()
+    try:
+        _push_to_github()
+        _send_discord()
+    finally:
+        _log_buffer.clear()
+        _buy_lines.clear()
+        _sell_lines.clear()
+        _signal_lines.clear()
+        _skip_lines.clear()
+        _error_lines.clear()

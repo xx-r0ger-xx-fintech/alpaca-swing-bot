@@ -15,17 +15,18 @@ def calculate_signals(df: pd.DataFrame, config: dict) -> tuple:
     df["ema_short"] = df["close"].ewm(span=config["EMA_SHORT"], adjust=False).mean()
     df["ema_long"]  = df["close"].ewm(span=config["EMA_LONG"],  adjust=False).mean()
 
-    # --- RSI (momentum) ---
-    delta = df["close"].diff()
-    gain  = delta.clip(lower=0).rolling(config["RSI_PERIOD"]).mean()
-    loss  = -delta.clip(upper=0).rolling(config["RSI_PERIOD"]).mean()
-    rs    = gain / loss
+    # --- RSI (momentum) — Wilder's smoothing method ---
+    delta    = df["close"].diff()
+    gain     = delta.clip(lower=0)
+    loss     = (-delta).clip(lower=0)
+    avg_gain = gain.ewm(alpha=1 / config["RSI_PERIOD"], adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / config["RSI_PERIOD"], adjust=False).mean()
+    rs       = avg_gain / avg_loss
     df["rsi"] = 100 - (100 / (1 + rs))
 
-    # --- VWAP (rolling fair value over the full lookback window) ---
-    df["cum_vol"]    = df["volume"].astype(float).cumsum()
-    df["cum_vol_px"] = (df["close"] * df["volume"].astype(float)).cumsum()
-    df["vwap"]       = df["cum_vol_px"] / df["cum_vol"]
+    # --- VWAP (20-day rolling fair value) ---
+    vol        = df["volume"].astype(float)
+    df["vwap"] = (df["close"] * vol).rolling(20).sum() / vol.rolling(20).sum()
 
     latest    = df.iloc[-1]
     ema_short = latest["ema_short"]

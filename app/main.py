@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, QueryOrderStatus
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -45,7 +45,7 @@ def get_clients():
 # ── Data fetching ──────────────────────────────────────────────────────────────
 
 def get_bars(data_client, symbol: str):
-    end   = datetime.datetime.now(ET) - timedelta(days=1)
+    end   = datetime.datetime.now(ET)
     start = end - timedelta(days=config.BARS_TO_FETCH)
 
     request = StockBarsRequest(
@@ -55,12 +55,17 @@ def get_bars(data_client, symbol: str):
         end=end,
     )
     bars = data_client.get_stock_bars(request)
+    df   = bars.df
 
-    if symbol not in bars or len(bars[symbol]) == 0:
+    if df is None or df.empty:
         return None
 
-    df = bars[symbol].df.reset_index()
-    return df
+    try:
+        df = df.loc[symbol].reset_index()
+    except KeyError:
+        return None
+
+    return df if not df.empty else None
 
 
 # ── Market hours ───────────────────────────────────────────────────────────────
@@ -80,70 +85,115 @@ def is_scan_window() -> bool:
 def run_scan(trading_client, data_client):
     logger.log("=== Alpaca Swing Bot — daily scan ===")
 
-    account        = trading_client.get_account()
-    equity         = float(account.equity)
-    cash           = float(account.cash)
-    open_positions = {p.symbol: p for p in trading_client.get_all_positions()}
-    trade_size     = min(equity * config.TRADE_SIZE_PCT, config.MAX_TRADE_SIZE)
+    try:
+        account        = trading_client.get_account()
+        equity         = float(account.equity)
+        cash           = float(account.cash)
+        open_positions = {p.symbol: p for p in trading_client.get_all_positions()}
+        trade_size     = min(equity * config.TRADE_SIZE_PCT, config.MAX_TRADE_SIZE)
 
-    logger.log_scan_start(equity, cash, trade_size, open_positions, len(config.WATCHLIST))
+        logger.log_scan_start(equity, cash, trade_size, open_positions, len(config.WATCHLIST))
 
-    for symbol in config.WATCHLIST:
+        # ── Phase 1: Exit checks for open positions ────────────────────────────
+        exited = set()
+        for symbol, position in list(open_positions.items()):
+            if symbol not in config.WATCHLIST:
+                continue
+            try:
+                df = get_bars(data_client, symbol)
+                if df is None:
+                    continue
 
-        # Guard: max positions
-        if len(open_positions) >= config.MAX_POSITIONS:
-            logger.log_skipped(symbol, "Max positions reached")
-            continue
+                signal, reason = calculate_signals(df, STRATEGY_CONFIG)
+                current_price  = float(df.iloc[-1]["close"])
 
-        # Guard: already holding
-        if symbol in open_positions:
-            logger.log_skipped(symbol, "Already in position")
-            continue
+                logger.log_decision(symbol, signal, reason, current_price)
+                exited.add(symbol)
 
-        # Guard: insufficient cash
-        if cash < trade_size:
-            logger.log_skipped(symbol, f"Insufficient cash (${cash:.2f} < ${trade_size:.2f})")
-            break
+                if signal != "SELL":
+                    continue
 
-        try:
-            df = get_bars(data_client, symbol)
-            if df is None:
-                logger.log_skipped(symbol, "No price data returned")
+                # Cancel open bracket child orders before closing the position
+                open_orders = trading_client.get_orders(
+                    GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+                )
+                for order in open_orders:
+                    try:
+                        trading_client.cancel_order_by_id(order.id)
+                    except Exception:
+                        pass
+
+                trading_client.close_position(symbol)
+                qty = float(position.qty)
+                logger.log_order(symbol, "SELL", current_price, qty)
+                del open_positions[symbol]
+                cash += qty * current_price
+
+            except Exception as e:
+                logger.log_error(f"{symbol} (exit check): {e}")
+
+        # ── Phase 2: Entry scan ────────────────────────────────────────────────
+        for symbol in config.WATCHLIST:
+
+            # Guard: max positions
+            if len(open_positions) >= config.MAX_POSITIONS:
+                logger.log_skipped(symbol, "Max positions reached")
                 continue
 
-            signal, reason = calculate_signals(df, STRATEGY_CONFIG)
-            current_price  = float(df.iloc[-1]["close"])
-
-            logger.log_decision(symbol, signal, reason, current_price)
-
-            if signal != "BUY":
+            # Guard: already holding (evaluated above — skip silently)
+            if symbol in open_positions:
                 continue
 
-            # Calculate order parameters
-            qty      = round(trade_size / current_price, 4)
-            tp_price = round(current_price * (1 + config.TAKE_PROFIT_PCT), 2)
-            sl_price = round(current_price * (1 - config.STOP_LOSS_PCT),   2)
+            # Guard: insufficient cash
+            if cash < trade_size:
+                logger.log_skipped(symbol, f"Insufficient cash (${cash:.2f} < ${trade_size:.2f})")
+                break
 
-            order = MarketOrderRequest(
-                symbol=symbol,
-                qty=qty,
-                side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY,
-                order_class=OrderClass.BRACKET,
-                take_profit=TakeProfitRequest(limit_price=tp_price),
-                stop_loss=StopLossRequest(stop_price=sl_price),
-            )
+            try:
+                df = get_bars(data_client, symbol)
+                if df is None:
+                    logger.log_skipped(symbol, "No price data returned")
+                    continue
 
-            trading_client.submit_order(order)
-            logger.log_order(symbol, "BUY", current_price, qty, tp_price, sl_price)
+                signal, reason = calculate_signals(df, STRATEGY_CONFIG)
+                current_price  = float(df.iloc[-1]["close"])
 
-            open_positions[symbol] = True  # track locally so loop stays accurate
-            cash -= trade_size
+                # Skip logging if this symbol was already evaluated in the exit phase
+                if symbol not in exited:
+                    logger.log_decision(symbol, signal, reason, current_price)
 
-        except Exception as e:
-            logger.log_error(f"{symbol}: {e}")
+                if signal != "BUY":
+                    continue
 
-    logger.log_scan_end()
+                # Calculate order parameters
+                qty      = round(trade_size / current_price, 4)
+                tp_price = round(current_price * (1 + config.TAKE_PROFIT_PCT), 2)
+                sl_price = round(current_price * (1 - config.STOP_LOSS_PCT),   2)
+
+                order = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,
+                    order_class=OrderClass.BRACKET,
+                    take_profit=TakeProfitRequest(limit_price=tp_price),
+                    stop_loss=StopLossRequest(stop_price=sl_price),
+                )
+
+                trading_client.submit_order(order)
+                logger.log_order(symbol, "BUY", current_price, qty, tp_price, sl_price)
+
+                open_positions[symbol] = True  # track locally so loop stays accurate
+                cash -= trade_size
+
+            except Exception as e:
+                logger.log_error(f"{symbol}: {e}")
+
+    except Exception as e:
+        logger.log_error(f"Scan aborted: {e}")
+
+    finally:
+        logger.log_scan_end()
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
@@ -165,10 +215,7 @@ def main():
             last_scan_date = today
 
         if not scanned_today and is_scan_window():
-            try:
-                run_scan(trading_client, data_client)
-            except Exception as e:
-                logger.log_error(f"Scan failed: {e}")
+            run_scan(trading_client, data_client)
             scanned_today = True
 
         time.sleep(60)  # check every minute
