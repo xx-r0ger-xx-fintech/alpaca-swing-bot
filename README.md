@@ -1,6 +1,6 @@
 # Alpaca Swing Bot
 
-A lightweight Python swing trading bot that runs on DigitalOcean App Platform. Uses a confluence of technical indicators to scan a stock watchlist every morning and automatically place bracket orders via the Alpaca API.
+A lightweight Python swing trading bot that runs on DigitalOcean App Platform. Uses a confluence of technical indicators to scan a stock watchlist every morning and automatically place fractional orders via the Alpaca API.
 
 ---
 
@@ -10,8 +10,9 @@ Every weekday at **9:35 AM ET**, the bot:
 
 1. Pulls 90 days of daily OHLCV data for each symbol in the watchlist
 2. Runs the signal strategy — requires all three indicators to align before trading
-3. Places bracket orders (with take profit and stop loss) for any BUY signals
-4. Logs every decision to DigitalOcean logs, GitHub, and Discord
+3. Places fractional market orders for any BUY signals, then attaches a GTC stop-loss as a safety net
+4. Exits positions via SELL signal (trend reversal) — profits are taken when the strategy says the trend has turned, not at a fixed percentage
+5. Logs every decision to DigitalOcean logs, GitHub, and Discord
 
 ---
 
@@ -23,7 +24,7 @@ Three indicators must confirm before a trade is placed:
 |---|---|---|
 | **EMA crossover** | 20 / 50 | Short EMA > Long EMA (0.5% tolerance) |
 | **RSI** | 14 | RSI > 55 |
-| **VWAP** | Rolling 90-day | Price > VWAP |
+| **VWAP** | Rolling 20-day | Price > VWAP |
 
 Every skipped trade includes a reason explaining which condition failed.
 
@@ -36,10 +37,9 @@ Every skipped trade includes a reason explaining which condition failed.
 | Trade size | 20% of account equity |
 | Max trade size | $500 |
 | Max open positions | 3 |
-| Take profit | +10% |
-| Stop loss | -4% |
+| Stop loss | -4% GTC safety net (primary exit is signal-based) |
 
-Position sizing compounds automatically — as the account grows, trade size grows with it.
+Position sizing compounds automatically — as the account grows, trade size grows with it. Fractional shares mean the full trade size is deployed regardless of share price.
 
 ---
 
@@ -116,8 +116,7 @@ The script creates the DO app, sets all secrets, and tails the deployment automa
 | `TRADE_SIZE_PCT` | No | Fraction of equity per trade (default: 0.20) |
 | `MAX_TRADE_SIZE` | No | Hard cap per trade in dollars (default: 500) |
 | `MAX_POSITIONS` | No | Max concurrent positions (default: 3) |
-| `TAKE_PROFIT_PCT` | No | Take profit percentage (default: 0.10) |
-| `STOP_LOSS_PCT` | No | Stop loss percentage (default: 0.04) |
+| `STOP_LOSS_PCT` | No | Stop loss percentage for GTC safety net (default: 0.04) |
 | `EMA_SHORT` | No | Short EMA period (default: 20) |
 | `EMA_LONG` | No | Long EMA period (default: 50) |
 | `RSI_BUY_THRESHOLD` | No | RSI buy threshold (default: 55) |
