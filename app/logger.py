@@ -300,13 +300,14 @@ def log_decision(symbol: str, signal, reason: str, price: float):
 
 def log_order(symbol: str, action: str, price: float, qty: float, tp: float = 0.0, sl: float = 0.0):
     if action == "BUY":
-        msg = (
-            f"ORDER BUY {qty:.4f} {symbol} @ ${price:.2f} | "
-            f"TP: ${tp:.2f} (+{((tp/price)-1)*100:.1f}%) | "
-            f"SL: ${sl:.2f} (-{(1-(sl/price))*100:.1f}%)"
-        )
+        parts = [f"ORDER BUY {qty:.6f} {symbol} @ ${price:.2f}"]
+        if tp:
+            parts.append(f"TP: ${tp:.2f} (+{((tp/price)-1)*100:.1f}%)")
+        if sl:
+            parts.append(f"SL: ${sl:.2f} (-{(1-(sl/price))*100:.1f}%)")
+        msg = " | ".join(parts)
     else:
-        msg = f"ORDER SELL {qty:.4f} {symbol} @ ${price:.2f}"
+        msg = f"ORDER SELL {qty:.6f} {symbol} @ ${price:.2f}"
     log(msg)
     _write_obsidian(f"  - **{msg}**")
     _buffer(f"  - **{msg}**")

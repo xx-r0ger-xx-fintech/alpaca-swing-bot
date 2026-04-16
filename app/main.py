@@ -9,11 +9,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, QueryOrderStatus
+from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, OrderStatus
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import DataFeed
 
 from app import config
 from app.strategy import calculate_signals
@@ -53,6 +54,7 @@ def get_bars(data_client, symbol: str):
         timeframe=TimeFrame.Day,
         start=start,
         end=end,
+        feed=DataFeed.IEX,  # requires Alpaca Unlimited subscription for SIP
     )
     bars = data_client.get_stock_bars(request)
     df   = bars.df
@@ -113,7 +115,7 @@ def run_scan(trading_client, data_client):
                 if signal != "SELL":
                     continue
 
-                # Cancel open bracket child orders before closing the position
+                # Cancel open GTC stop-loss orders before closing the position
                 open_orders = trading_client.get_orders(
                     GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
                 )
@@ -138,7 +140,7 @@ def run_scan(trading_client, data_client):
             # Guard: max positions
             if len(open_positions) >= config.MAX_POSITIONS:
                 logger.log_skipped(symbol, "Max positions reached")
-                continue
+                break
 
             # Guard: already holding (evaluated above — skip silently)
             if symbol in open_positions:
@@ -165,23 +167,46 @@ def run_scan(trading_client, data_client):
                 if signal != "BUY":
                     continue
 
-                # Calculate order parameters
-                qty      = round(trade_size / current_price, 4)
-                tp_price = round(current_price * (1 + config.TAKE_PROFIT_PCT), 2)
-                sl_price = round(current_price * (1 - config.STOP_LOSS_PCT),   2)
-
+                # Submit fractional market buy using notional (dollar amount)
                 order = MarketOrderRequest(
                     symbol=symbol,
-                    qty=qty,
+                    notional=round(trade_size, 2),
                     side=OrderSide.BUY,
                     time_in_force=TimeInForce.DAY,
-                    order_class=OrderClass.BRACKET,
-                    take_profit=TakeProfitRequest(limit_price=tp_price),
-                    stop_loss=StopLossRequest(stop_price=sl_price),
                 )
+                submitted = trading_client.submit_order(order)
 
-                trading_client.submit_order(order)
-                logger.log_order(symbol, "BUY", current_price, qty, tp_price, sl_price)
+                # Poll until filled (market hours — typically fills within 1–2s)
+                fill_price = None
+                filled_qty = None
+                for _ in range(15):
+                    time.sleep(1)
+                    fill_status = trading_client.get_order_by_id(submitted.id)
+                    if fill_status.status == OrderStatus.FILLED:
+                        fill_price = float(fill_status.filled_avg_price)
+                        filled_qty = float(fill_status.filled_qty)
+                        break
+
+                if fill_price is None:
+                    try:
+                        trading_client.cancel_order_by_id(submitted.id)
+                    except Exception:
+                        pass
+                    logger.log_error(f"{symbol}: Market order did not fill within 15s — cancelled")
+                    continue
+
+                # Place GTC stop-loss as safety net (signal-based SELL is the primary exit)
+                sl_price = round(fill_price * (1 - config.STOP_LOSS_PCT), 2)
+                stop = StopOrderRequest(
+                    symbol=symbol,
+                    qty=round(filled_qty, 6),
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.GTC,
+                    stop_price=sl_price,
+                )
+                trading_client.submit_order(stop)
+
+                logger.log_order(symbol, "BUY", fill_price, filled_qty, sl=sl_price)
 
                 open_positions[symbol] = True  # track locally so loop stays accurate
                 cash -= trade_size

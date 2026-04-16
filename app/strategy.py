@@ -11,6 +11,8 @@ def calculate_signals(df: pd.DataFrame, config: dict) -> tuple:
     if len(df) < config["EMA_LONG"]:
         return None, f"Insufficient data ({len(df)} bars, need {config['EMA_LONG']})"
 
+    df = df.copy()  # don't mutate the caller's DataFrame
+
     # --- Exponential Moving Averages (trend direction) ---
     df["ema_short"] = df["close"].ewm(span=config["EMA_SHORT"], adjust=False).mean()
     df["ema_long"]  = df["close"].ewm(span=config["EMA_LONG"],  adjust=False).mean()
